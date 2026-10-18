@@ -1,0 +1,56 @@
+{
+  "name": "remowser",
+  "version": "0.1.0",
+  "description": "REMOWSER – Local AI-agentic browser built with Electron, React, Playwright and local REMO LLM.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build:main": "tsc",
+    "build:renderer": "esbuild src/renderer/index.tsx --bundle --outfile=dist/renderer/bundle.js --loader:.css=css --platform=browser",
+    "copy:assets": "cp src/renderer/index.html dist/renderer/index.html && mkdir -p dist/agents dist/assets dist/renderer && cp src/agents/domSimplifier.js dist/agents/domSimplifier.js && cp assets/icon.png dist/assets/icon.png && cp assets/icon.png dist/renderer/icon.png",
+    "build": "npm run build:main && npm run build:renderer && npm run copy:assets",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "dev": "npm run build && electron .",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Antigravity Engineer",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.4",
+    "lucide-react": "^1.59.0",
+    "playwright": "^1.47.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.2",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.9.1",
+    "eslint-plugin-react": "^7.35.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "build": {
+    "appId": "com.remowser.app",
+    "productName": "REMOWSER",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "assets/**/*"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Network;WebBrowser;",
+      "icon": "assets/icon.png"
+    }
+  }
+}
