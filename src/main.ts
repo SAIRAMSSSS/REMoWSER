@@ -4,7 +4,7 @@
  * High-performance, on-device autonomous AI browser controller.
  */
 
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, ipcMain, session, Menu } from 'electron';
 import { join } from 'path';
 import { readFileSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
@@ -18,12 +18,7 @@ import type { AgentCommand, AgentStatus, TaskItem, HumanVerificationData, ChatMe
 const CDP_PORT = 9222;
 const CHROME_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-app.commandLine.appendSwitch('remote-debugging-port', `${CDP_PORT}`);
-app.commandLine.appendSwitch('enable-features', 'NetworkService,NetworkServiceInProcess');
-app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,IsolateOrigins,site-per-process');
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
-app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-infobars');
 
 let mainWindow: BrowserWindow | null = null;
 let pwBrowser: Browser | null = null;
@@ -982,6 +977,8 @@ app.whenReady().then(async () => {
   ];
   const iconPath = possibleIcons.find(p => existsSync(p));
 
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -990,6 +987,7 @@ app.whenReady().then(async () => {
     title: 'REMOWSER – Local AI Browser',
     backgroundColor: '#090a0f',
     icon: iconPath,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -998,6 +996,7 @@ app.whenReady().then(async () => {
     }
   });
 
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.webContents.on('did-finish-load', () => {
