@@ -52,14 +52,14 @@ Navigate to the project's `dist/` folder in your file manager and double-click:
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        REMOWSER BROWSER SHELL                          │
-│  [🪐 REMOWSER] [DuckDuckGo +] [ < > ↻ ] [ 🛡️ Omnibox ] [ ⚡ REMO Agent ]│
+│  [🪐 REMOWSER] [New Tab +] [ < > ↻ ] [ 🛡️ Omnibox ]  [ ⚡ REMO Agent ]│
 ├──────────────────────────────────────┬─────────────────────────────────┤
 │                                      │   REMOWSER AI SIDEBAR           │
 │                                      │ • Status: ⚡ REMO Online        │
 │          EMBEDDED CHROMIUM           │ • Model: Qwen2.5 Local @ 11434  │
 │               WEBVIEW                │ • Task Queue (Async Background) │
-│  (Interactive web browsing with      │ • Action Cards & Extracted Data │
-│   built-in ad/tracker blocking)      │ • Security Checkpoint Intercept │
+│   (Custom New Tab Home Dashboard +   │ • Action Cards & Extracted Data │
+│     built-in ad/tracker blocking)    │ • Security Checkpoint Intercept │
 │                                      │ • Natural Language Prompt Area  │
 └──────────────────────────────────────┴─────────────────────────────────┘
                                    │

@@ -1,13 +1,7 @@
 // src/main.ts
 /**
  * REMOWSER – Main Process & Agentic Orchestrator
- * Implements:
- *  - Electron Browser Shell with embedded Chromium Webview
- *  - Playwright controller attached via Chrome DevTools Protocol (CDP)
- *  - Autonomous Observe-Decide-Act Agent Loop
- *  - Security Boundaries & Human-in-the-Loop Interceptor
- *  - Built-in Lightweight Ad/Tracker Blocker
- *  - Local LLM (REMO) integration via Ollama/llama.cpp
+ * High-performance, on-device autonomous AI browser controller.
  */
 
 import { app, BrowserWindow, ipcMain, session } from 'electron';
@@ -22,9 +16,9 @@ import type { AgentCommand, AgentStatus, TaskItem, HumanVerificationData, ChatMe
 // Configuration & Flags
 // ---------------------------------------------------------------------------
 const CDP_PORT = 9222;
-// Enable Chrome DevTools Protocol remote debugging port for Playwright CDP attachment
 app.commandLine.appendSwitch('remote-debugging-port', `${CDP_PORT}`);
 app.commandLine.appendSwitch('enable-features', 'NetworkService,NetworkServiceInProcess');
+app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess');
 
 let mainWindow: BrowserWindow | null = null;
 let pwBrowser: Browser | null = null;
@@ -34,11 +28,10 @@ let currentActivePage: Page | null = null;
 const taskQueue: TaskItem[] = [];
 let currentRunningTaskId: string | null = null;
 let resumeResolver: ((value: boolean) => void) | null = null;
-let abortController: AbortController | null = null;
 
 // LLM Configuration
 const LLM_BASE_URL = 'http://localhost:11434';
-let preferredModel = 'qwen2.5:7b-instruct-q4_0';
+let preferredModel = 'qwen2.5:3b';
 
 // ---------------------------------------------------------------------------
 // IPC Broadcast Helpers
@@ -110,7 +103,7 @@ function setupAdBlocker() {
 // Playwright Autonomous Browser Controller
 // ---------------------------------------------------------------------------
 async function initPlaywrightAgentBrowser(): Promise<Browser> {
-  broadcastStatus('Initializing autonomous browser engine...', 'running');
+  broadcastStatus('Initializing browser engine...', 'running');
   try {
     const browser = await chromium.launch({
       headless: true,
@@ -119,7 +112,7 @@ async function initPlaywrightAgentBrowser(): Promise<Browser> {
     console.log('[Playwright] Autonomous background Chromium browser initialized.');
     return browser;
   } catch (err: any) {
-    console.warn('[Playwright] Headless launch fallback to CDP...', err.message);
+    console.warn('[Playwright] Launch fallback to CDP...', err.message);
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     } catch {
@@ -166,7 +159,7 @@ async function extractSimplifiedDOM(page: Page): Promise<SimplifierResult> {
 }
 
 // ---------------------------------------------------------------------------
-// REMO Local LLM Caller (Ollama / llama.cpp)
+// REMO Local LLM (Ollama / llama.cpp)
 // ---------------------------------------------------------------------------
 async function ensureOllamaService(): Promise<void> {
   try {
@@ -180,7 +173,7 @@ async function ensureOllamaService(): Promise<void> {
   }
 
   console.log('[REMO Engine] Auto-starting local Ollama service in background...');
-  broadcastStatus('🚀 Starting local AI engine (REMO)...', 'running');
+  broadcastStatus('Starting local AI engine (REMO)...', 'running');
 
   try {
     const proc = spawn('ollama', ['serve'], {
@@ -189,7 +182,6 @@ async function ensureOllamaService(): Promise<void> {
     });
     proc.unref();
 
-    // Wait up to 12 seconds for Ollama to become ready
     for (let i = 0; i < 12; i++) {
       await new Promise(r => setTimeout(r, 1000));
       try {
@@ -199,7 +191,7 @@ async function ensureOllamaService(): Promise<void> {
           break;
         }
       } catch {
-        // Continue waiting
+        // waiting
       }
     }
   } catch (err: any) {
@@ -241,34 +233,146 @@ async function autoDetectModel(): Promise<string> {
   return preferredModel;
 }
 
+// ---------------------------------------------------------------------------
+// Intent Detection & Direct Conversational Chat
+// ---------------------------------------------------------------------------
+function isConversationalPrompt(prompt: string): boolean {
+  const p = prompt.trim().toLowerCase();
+  const greetings = [
+    'hi', 'hello', 'hey', 'yo', 'sup', 'who are you', 'what is remowser',
+    'what can you do', 'help', 'what are your features', 'test', 'good morning', 'good evening'
+  ];
+  if (greetings.includes(p)) return true;
+  if (/^(hi|hello|hey|greetings|help)\b/i.test(p) && p.length < 25) return true;
+  return false;
+}
+
+async function callRemoDirectChat(prompt: string): Promise<string> {
+  const endpoint = `${LLM_BASE_URL}/v1/chat/completions`;
+  const systemPrompt = `You are REMO, the autonomous AI inside REMOWSER, an open-source local AI browser.
+You run completely on-device using local Ollama models.
+Introduce yourself warmly and concisely in 2-3 sentences.
+State that you can:
+1. Autonomously browse the web, search Google, and compare prices
+2. Open websites, click buttons, fill search inputs, and extract data
+Give 2 quick examples the user can try right now (e.g. "Search for RTX 4070 prices on Google", "Find top tech stories on Hacker News").`;
+
+  try {
+    const res = await axios.post(
+      endpoint,
+      {
+        model: preferredModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 280
+      },
+      { timeout: 15000 }
+    );
+    return res.data?.choices?.[0]?.message?.content || 'Hello! I am REMO, your autonomous local AI browser. Ask me to search Google, compare prices, or automate any website task!';
+  } catch {
+    return 'Hello! I am REMO, your autonomous local AI browser. Enter any task (e.g. "Search for iPhone 16 reviews on Google" or "Open wikipedia and search Linux") and I will browse and extract the answer for you!';
+  }
+}
+
+function resolveTargetNavigation(prompt: string): string {
+  const trimmed = prompt.trim();
+  const lower = trimmed.toLowerCase();
+
+  // 1. Direct URL
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return trimmed;
+  }
+
+  // 2. Direct domain
+  const domainMatch = trimmed.match(/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?$/);
+  if (domainMatch) {
+    return `https://${trimmed}`;
+  }
+
+  // 3. Known services
+  if (lower.includes('youtube')) {
+    const q = trimmed.replace(/^(go to|open|search|find)\s+youtube\s*(and search for|and search|for)?/i, '')
+                     .replace(/on youtube/i, '')
+                     .trim();
+    if (q) return `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`;
+    return 'https://www.youtube.com';
+  }
+
+  if (lower.includes('wikipedia')) {
+    const q = trimmed.replace(/^(go to|open|search|find)\s+wikipedia\s*(and search for|and search|for|about)?/i, '')
+                     .replace(/on wikipedia/i, '')
+                     .trim();
+    if (q) return `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(q)}`;
+    return 'https://www.wikipedia.org';
+  }
+
+  if (lower.includes('github')) {
+    const q = trimmed.replace(/^(go to|open|search|find)\s+github\s*(and search for|and search|for)?/i, '')
+                     .replace(/on github/i, '')
+                     .trim();
+    if (q) return `https://github.com/search?q=${encodeURIComponent(q)}`;
+    return 'https://github.com';
+  }
+
+  if (lower.includes('reddit')) {
+    const q = trimmed.replace(/^(go to|open|search|find)\s+reddit\s*(and search for|and search|for)?/i, '')
+                     .replace(/on reddit/i, '')
+                     .trim();
+    if (q) return `https://www.reddit.com/search/?q=${encodeURIComponent(q)}`;
+    return 'https://www.reddit.com';
+  }
+
+  // 4. Default to Google Search (NOT DuckDuckGo)
+  let cleanQuery = trimmed
+    .replace(/^(search for|search|find|look up|browse to|google|get me)\s+/i, '')
+    .trim();
+
+  if (!cleanQuery) cleanQuery = trimmed;
+  return `https://www.google.com/search?q=${encodeURIComponent(cleanQuery)}`;
+}
+
+// ---------------------------------------------------------------------------
+// REMO Autonomous Action Predictor
+// ---------------------------------------------------------------------------
 async function callRemoLLM(userGoal: string, domContext: string, stepHistory: string[]): Promise<AgentCommand> {
   const endpoint = `${LLM_BASE_URL}/v1/chat/completions`;
 
-  const systemPrompt = `You are REMO, an expert autonomous browser agent built for REMOWSER.
-Your task is to fulfill the User's Goal by interacting with the simplified web page.
+  const systemPrompt = `You are REMO, an autonomous browser AI. You inspect the current web page to fulfill the user's goal.
+Respond ONLY with a single JSON object. No conversational filler outside the JSON.
 
-CRITICAL INSTRUCTIONS:
-1. Always respond in STRICT JSON format with NO markdown wrapping, matching this schema:
+JSON SCHEMA:
 {
-  "thought": "Brief 1-sentence reasoning for what you are doing next",
-  "action": "open_tab" | "switch_tab" | "click" | "type" | "scroll" | "extract_data" | "task_complete",
-  "url": "https://..." (required for open_tab),
-  "id": 12 (integer REMOWSER_ID, required for click and type),
-  "text": "text to type" (required for type),
-  "direction": "down" | "up" (for scroll),
-  "target": "description of extracted info" (for extract_data),
-  "message": "Final answer or completion summary" (for task_complete)
+  "thought": "1 sentence describing what you observe and what you are doing",
+  "action": "click" | "type" | "scroll" | "open_tab" | "extract_data" | "task_complete",
+  "id": 1,
+  "text": "text to type",
+  "direction": "down",
+  "target": "target description",
+  "message": "Final answer or summary to the user"
 }
-2. When searching or filling inputs, identify the input element [#ID] and use {"action": "type", "id": ID, "text": "..."}.
-3. After typing a query, click the submit/search button or press enter.
-4. When you have found the requested answer, use {"action": "extract_data", "target": "..."} followed by {"action": "task_complete", "message": "..."}.
-5. Never hallucinate IDs. Only use [#ID] numbers visible in the Interactive Elements list.`;
+
+FEW-SHOT EXAMPLES:
+Example 1 (Found the answer in page/search results):
+{"thought": "I found the requested price in the search results.", "action": "task_complete", "message": "The RTX 4070 is priced starting at $549 on Newegg and $599 on Best Buy."}
+
+Example 2 (Clicking the top relevant result link):
+{"thought": "Clicking the first search result article [#3].", "action": "click", "id": 3}
+
+Example 3 (Typing query into input):
+{"thought": "Typing the search query into [#1].", "action": "type", "id": 1, "text": "RTX 4070 price"}
+
+CRITICAL RULES:
+1. If the information to answer the user is ALREADY visible in the page text or search snippets, IMMEDIATELY return action: "task_complete" with the complete message!
+2. Only use [#ID] numbers that actually exist in the Interactive Elements list. Never hallucinate IDs.`;
 
   const userMessage = [
     `USER GOAL: "${userGoal}"`,
     '',
-    'ACTION HISTORY SO FAR:',
-    stepHistory.length > 0 ? stepHistory.map((s, i) => `${i + 1}. ${s}`).join('\n') : '(Starting fresh)',
+    'ACTIONS TAKEN SO FAR:',
+    stepHistory.length > 0 ? stepHistory.map((s, i) => `${i + 1}. ${s}`).join('\n') : '(Starting fresh on page)',
     '',
     domContext
   ].join('\n');
@@ -283,12 +387,12 @@ CRITICAL INSTRUCTIONS:
           { role: 'user', content: userMessage }
         ],
         temperature: 0.1,
-        max_tokens: 600,
+        max_tokens: 500,
         stream: false
       },
       {
         headers: { 'Content-Type': 'application/json' },
-        timeout: 45000
+        timeout: 40000
       }
     );
 
@@ -296,7 +400,7 @@ CRITICAL INSTRUCTIONS:
     return parseCommandJSON(rawContent);
   } catch (err: any) {
     if (err.code === 'ECONNREFUSED') {
-      throw new Error(`Could not connect to REMO LLM at ${LLM_BASE_URL}. Ensure Ollama is running ('ollama serve') and model '${preferredModel}' is loaded.`);
+      throw new Error(`Could not connect to REMO LLM at ${LLM_BASE_URL}. Ensure Ollama is running ('ollama serve') with '${preferredModel}'.`);
     }
     throw new Error(`LLM call failed: ${err.message}`);
   }
@@ -304,16 +408,13 @@ CRITICAL INSTRUCTIONS:
 
 function parseCommandJSON(raw: string): AgentCommand {
   let cleaned = raw.trim();
-  // Strip code fences if present
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '').trim();
   }
 
-  // Attempt direct JSON parse
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Extract first JSON object match
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       try {
@@ -324,10 +425,9 @@ function parseCommandJSON(raw: string): AgentCommand {
     }
   }
 
-  // Fallback default
   return {
     action: 'task_complete',
-    message: `REMO Output: ${raw.slice(0, 300)}`
+    message: raw.replace(/[{}]/g, '').slice(0, 300)
   };
 }
 
@@ -335,7 +435,7 @@ function parseCommandJSON(raw: string): AgentCommand {
 // Autonomous Observe-Decide-Act Agent Loop
 // ---------------------------------------------------------------------------
 async function runAgentTaskLoop(task: TaskItem) {
-  const MAX_STEPS = 15;
+  const MAX_STEPS = 10;
   let step = 0;
   const history: string[] = [];
 
@@ -343,8 +443,26 @@ async function runAgentTaskLoop(task: TaskItem) {
     currentRunningTaskId = task.id;
     task.status = 'in_progress';
     broadcastTaskQueue();
-    broadcastStatus(`REMO started task: "${task.prompt}"`, 'running', 1, MAX_STEPS);
-    broadcastChat('system', `🚀 Task initialized: "${task.prompt}"`);
+
+    const trimmedPrompt = task.prompt.trim();
+
+    // 1. Direct Conversational Handling
+    if (isConversationalPrompt(trimmedPrompt)) {
+      broadcastStatus('REMO is thinking...', 'running');
+      broadcastChat('system', `💬 Conversational query: "${trimmedPrompt}"`);
+      const chatReply = await callRemoDirectChat(trimmedPrompt);
+      task.status = 'completed';
+      task.result = chatReply;
+      broadcastTaskQueue();
+      broadcastStatus('Ready', 'idle');
+      broadcastChat('remo', chatReply);
+      return;
+    }
+
+    // 2. Resolve Target Navigation
+    const initialUrl = resolveTargetNavigation(trimmedPrompt);
+    broadcastStatus(`Navigating to ${initialUrl}...`, 'running', 1, MAX_STEPS);
+    broadcastChat('system', `🚀 Task initialized: "${trimmedPrompt}"\n🌐 Opening: ${initialUrl}`);
 
     // Ensure Playwright browser is ready
     if (!pwBrowser || !pwBrowser.isConnected()) {
@@ -361,25 +479,11 @@ async function runAgentTaskLoop(task: TaskItem) {
       contextToClean = context;
       page = await context.newPage();
     } catch {
-      // Fallback for CDP connections where Target.createBrowserContext is not supported
       const cdpContext = pwBrowser.contexts()[0];
       page = await cdpContext.newPage();
     }
     currentActivePage = page;
 
-    // Check if initial prompt is a direct URL or a search query
-    let initialUrl = 'https://duckduckgo.com';
-    const trimmed = task.prompt.trim();
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      initialUrl = trimmed;
-    } else if (trimmed.includes('.com') || trimmed.includes('.org') || trimmed.includes('.net')) {
-      const match = trimmed.match(/https?:\/\/[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}[^\s]*/);
-      if (match) {
-        initialUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
-      }
-    }
-
-    broadcastStatus(`Navigating to ${initialUrl}...`, 'running', 1, MAX_STEPS);
     await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     broadcastBrowserNavigate(initialUrl);
 
@@ -388,14 +492,13 @@ async function runAgentTaskLoop(task: TaskItem) {
       task.currentStep = `Step ${step}/${MAX_STEPS}`;
       broadcastTaskQueue();
 
-      // Give dynamic content a moment to settle
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1200);
 
-      // 1. OBSERVE: Run DOM Simplifier
-      broadcastStatus(`Reading and simplifying page structure...`, 'running', step, MAX_STEPS);
+      // OBSERVE: Run DOM Simplifier
+      broadcastStatus(`Reading page structure & data...`, 'running', step, MAX_STEPS);
       const domResult = await extractSimplifiedDOM(page);
 
-      // 2. SECURITY BOUNDARY & HUMAN-IN-THE-LOOP CHECK
+      // SECURITY BOUNDARY & HUMAN-IN-THE-LOOP CHECK
       if (domResult.security.hasCaptcha || domResult.security.hasLoginForm || domResult.security.hasCheckoutForm) {
         const secReason = domResult.security.securityReason || 'Security verification required';
         const detectedType = domResult.security.hasCaptcha ? 'captcha' : (domResult.security.hasLoginForm ? 'login' : 'checkout');
@@ -404,9 +507,7 @@ async function runAgentTaskLoop(task: TaskItem) {
         task.status = 'paused';
         broadcastTaskQueue();
 
-        // Surface the URL to the main view so user can resolve it
         broadcastBrowserNavigate(page.url());
-
         broadcastHumanVerification({
           taskId: task.id,
           reason: secReason,
@@ -414,44 +515,42 @@ async function runAgentTaskLoop(task: TaskItem) {
           detectedType
         });
 
-        broadcastChat('system', `⚠️ **Human-in-the-Loop Intercepted**: ${secReason}. The tab is surfaced in your browser view. Please complete the action and click 'Approve / Resume Agent' in the sidebar.`);
+        broadcastChat('system', `⚠️ **Human Action Required**: ${secReason}. The tab is surfaced in your browser. Please solve it and click 'Approve / Resume Agent' in the sidebar.`);
 
-        // Wait for resume signal
         const shouldContinue = await new Promise<boolean>((resolve) => {
           resumeResolver = resolve;
         });
 
         broadcastHumanVerification(null);
-
         if (!shouldContinue) {
-          throw new Error('Task was aborted by user during verification checkpoint.');
+          throw new Error('Task was cancelled by user during verification.');
         }
 
         broadcastStatus('Resuming autonomous execution...', 'running', step, MAX_STEPS);
         task.status = 'in_progress';
         broadcastTaskQueue();
-        await page.waitForTimeout(1500); // Wait for user changes to settle
+        await page.waitForTimeout(1500);
         continue;
       }
 
-      // 3. DECIDE: Prompt REMO Local LLM
-      broadcastStatus(`REMO is thinking...`, 'running', step, MAX_STEPS);
+      // DECIDE: Prompt REMO Local LLM
+      broadcastStatus(`REMO is reasoning...`, 'running', step, MAX_STEPS);
       const command = await callRemoLLM(task.prompt, domResult.domContext, history);
 
       if (command.thought) {
         broadcastChat('remo', `💭 *${command.thought}*`);
       }
 
-      // 4. ACT: Execute command via Playwright
       history.push(`${command.action} ${command.id ? `on #${command.id}` : ''} ${command.text ? `text="${command.text}"` : ''} ${command.url || ''}`);
 
+      // ACT: Check for Task Completion
       if (command.action === 'task_complete') {
         const finalMsg = command.message || 'Task completed successfully!';
         task.status = 'completed';
         task.result = finalMsg;
         broadcastTaskQueue();
-        broadcastStatus(`✅ ${finalMsg}`, 'completed', step, MAX_STEPS);
-        broadcastChat('remo', `🎉 **Task Completed**: ${finalMsg}`, command);
+        broadcastStatus(`✅ Done`, 'completed', step, MAX_STEPS);
+        broadcastChat('remo', `🎉 **Result**:\n${finalMsg}`, command);
         break;
       }
 
@@ -468,27 +567,53 @@ async function runAgentTaskLoop(task: TaskItem) {
         }
 
         case 'click': {
-          if (command.id) {
-            const selector = `[data-remowser-id="${command.id}"]`;
-            const element = page.locator(selector).first();
-            await element.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-            await element.click({ timeout: 5000, force: true });
-            broadcastChat('remo', `👆 Clicked element [#${command.id}]`, command);
-            broadcastBrowserNavigate(page.url());
+          const targetId = command.id;
+          let clicked = false;
+          if (targetId) {
+            const loc = page.locator(`[data-remowser-id="${targetId}"]`).first();
+            if (await loc.count() > 0) {
+              await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+              await loc.click({ timeout: 4000, force: true }).catch(() => {});
+              clicked = true;
+              broadcastChat('remo', `👆 Clicked [#${targetId}]`, command);
+            }
           }
+          if (!clicked) {
+            // Smart fallback: click first result link
+            const firstLink = page.locator('h3 a, .g a, article a').first();
+            if (await firstLink.count() > 0) {
+              await firstLink.click({ timeout: 4000, force: true }).catch(() => {});
+              broadcastChat('remo', `👆 Clicked top result link`, command);
+            }
+          }
+          await page.waitForTimeout(1000);
+          broadcastBrowserNavigate(page.url());
           break;
         }
 
         case 'type': {
-          if (command.id && command.text) {
-            const selector = `[data-remowser-id="${command.id}"]`;
-            const input = page.locator(selector).first();
-            await input.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-            await input.click({ force: true }).catch(() => {});
-            await input.fill(command.text, { timeout: 5000 });
-            // If it's a search input, optionally press Enter
-            await input.press('Enter').catch(() => {});
-            broadcastChat('remo', `⌨️ Typed "${command.text}" into [#${command.id}]`, command);
+          if (command.text) {
+            let typed = false;
+            if (command.id) {
+              const input = page.locator(`[data-remowser-id="${command.id}"]`).first();
+              if (await input.count() > 0) {
+                await input.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+                await input.click({ force: true }).catch(() => {});
+                await input.fill(command.text, { timeout: 4000 });
+                await input.press('Enter').catch(() => {});
+                typed = true;
+                broadcastChat('remo', `⌨️ Typed "${command.text}" into [#${command.id}]`, command);
+              }
+            }
+            if (!typed) {
+              const anyInput = page.locator('input[type="text"], input[type="search"], textarea').first();
+              if (await anyInput.count() > 0) {
+                await anyInput.fill(command.text, { timeout: 4000 });
+                await anyInput.press('Enter').catch(() => {});
+                broadcastChat('remo', `⌨️ Typed "${command.text}" into search field`, command);
+              }
+            }
+            await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
             broadcastBrowserNavigate(page.url());
           }
           break;
@@ -503,13 +628,12 @@ async function runAgentTaskLoop(task: TaskItem) {
 
         case 'extract_data': {
           const target = command.target || 'Information';
-          const fullText = await page.evaluate(() => document.body.innerText.slice(0, 1500));
+          const fullText = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 1500) : '');
           broadcastChat('remo', `📄 **Extracted Data** (${target}):\n${fullText.slice(0, 400)}...`, command, { target, content: fullText.slice(0, 600) });
           break;
         }
 
         case 'switch_tab': {
-          // Handled if multiple pages are active
           break;
         }
       }
@@ -518,7 +642,7 @@ async function runAgentTaskLoop(task: TaskItem) {
     if (step >= MAX_STEPS && task.status !== 'completed') {
       task.status = 'completed';
       task.result = 'Reached maximum step limit.';
-      broadcastStatus('Task finished (step limit reached)', 'completed');
+      broadcastStatus('Task finished', 'completed');
       broadcastChat('system', 'ℹ️ Reached maximum allowed autonomous steps.');
     }
 
@@ -560,7 +684,6 @@ function registerIPCHandlers() {
     broadcastTaskQueue();
     broadcastChat('user', prompt.trim());
 
-    // Run task asynchronously
     setTimeout(() => {
       runAgentTaskLoop(newTask);
     }, 100);
@@ -594,7 +717,7 @@ function registerIPCHandlers() {
 
   ipcMain.handle('get-models', async () => {
     const detected = await autoDetectModel();
-    return [detected, 'qwen2.5:7b-instruct-q4_0', 'llama3.1:8b-instruct-q4_0', 'qwen2.5:3b'];
+    return [detected, 'qwen2.5:3b', 'qwen2.5:7b-instruct-q4_0', 'llama3.1:8b-instruct-q4_0'];
   });
 }
 
@@ -605,11 +728,9 @@ app.whenReady().then(async () => {
   setupAdBlocker();
   registerIPCHandlers();
 
-  // 1. Ensure local LLM server is up and running in background with zero user intervention
   await ensureOllamaService();
   await autoDetectModel();
 
-  // 2. Resolve App Icon
   const possibleIcons = [
     join(__dirname, 'assets', 'icon.png'),
     join(__dirname, '..', 'assets', 'icon.png'),
@@ -619,22 +740,21 @@ app.whenReady().then(async () => {
   const iconPath = possibleIcons.find(p => existsSync(p));
 
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 1000,
-    minHeight: 700,
+    width: 1440,
+    height: 920,
+    minWidth: 1050,
+    minHeight: 720,
     title: 'REMOWSER – Local AI Browser',
-    backgroundColor: '#0f1117',
+    backgroundColor: '#090a0f',
     icon: iconPath,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: true // Enables embedded Chromium webview for the browser engine
+      webviewTag: true
     }
   });
 
-  // Load the React frontend
   mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.webContents.on('did-finish-load', () => {
