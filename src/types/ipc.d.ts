@@ -25,6 +25,7 @@ export interface AgentStatus {
 export interface TaskItem {
   id: string;
   prompt: string;
+  currentUrl?: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'paused';
   createdAt: number;
   result?: string;
@@ -50,7 +51,7 @@ export interface ChatMessage {
 declare global {
   interface Window {
     remowser: {
-      submitPrompt(prompt: string): Promise<{ success: boolean; taskId: string; error?: string }>;
+      submitPrompt(prompt: string, currentUrl?: string): Promise<{ success: boolean; taskId?: string; error?: string }>;
       cancelTask(taskId: string): Promise<{ success: boolean }>;
       resumeAgent(taskId: string): Promise<{ success: boolean }>;
       navigateActiveWebview(url: string): Promise<{ success: boolean }>;

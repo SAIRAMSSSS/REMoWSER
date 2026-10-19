@@ -16,9 +16,14 @@ import type { AgentCommand, AgentStatus, TaskItem, HumanVerificationData, ChatMe
 // Configuration & Flags
 // ---------------------------------------------------------------------------
 const CDP_PORT = 9222;
+const CHROME_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 app.commandLine.appendSwitch('remote-debugging-port', `${CDP_PORT}`);
 app.commandLine.appendSwitch('enable-features', 'NetworkService,NetworkServiceInProcess');
-app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess');
+app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,IsolateOrigins,site-per-process');
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-infobars');
 
 let mainWindow: BrowserWindow | null = null;
 let pwBrowser: Browser | null = null;
@@ -75,48 +80,98 @@ function broadcastBrowserNavigate(url: string) {
 }
 
 // ---------------------------------------------------------------------------
-// System Ad-Blocker (Lightweight network filter)
+// Anti-Bot Stealth & Ad-Blocker Configuration
 // ---------------------------------------------------------------------------
-function setupAdBlocker() {
+function setupAntiBotAndStealth() {
   try {
-    const adPatterns = [
-      '*://*.doubleclick.net/*',
-      '*://*.googleadservices.com/*',
-      '*://*.googlesyndication.com/*',
-      '*://*.adnxs.com/*',
-      '*://*.adservice.google.com/*',
-      '*://*.scorecardresearch.com/*',
-      '*://*.outbrain.com/*',
-      '*://*.taboola.com/*',
-      '*://*.amazon-adsystem.com/*'
-    ];
+    app.userAgentFallback = CHROME_USER_AGENT;
 
-    session.defaultSession.webRequest.onBeforeRequest({ urls: adPatterns }, (details, callback) => {
-      callback({ cancel: true });
+    const configureSession = (sess: Electron.Session) => {
+      sess.setUserAgent(CHROME_USER_AGENT);
+
+      // Ad Blocker: filter telemetry & advertising trackers
+      const adPatterns = [
+        '*://*.doubleclick.net/*',
+        '*://*.googleadservices.com/*',
+        '*://*.googlesyndication.com/*',
+        '*://*.adnxs.com/*',
+        '*://*.adservice.google.com/*',
+        '*://*.scorecardresearch.com/*',
+        '*://*.outbrain.com/*',
+        '*://*.taboola.com/*',
+        '*://*.amazon-adsystem.com/*'
+      ];
+      sess.webRequest.onBeforeRequest({ urls: adPatterns }, (_details, callback) => {
+        callback({ cancel: true });
+      });
+
+      // Emulate authentic Chrome Desktop headers (Prevents Bot Classification)
+      sess.webRequest.onBeforeSendHeaders((details, callback) => {
+        const headers = { ...details.requestHeaders };
+        headers['User-Agent'] = CHROME_USER_AGENT;
+        headers['sec-ch-ua'] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"';
+        headers['sec-ch-ua-mobile'] = '?0';
+        headers['sec-ch-ua-platform'] = '"Linux"';
+        if (!headers['Accept-Language']) {
+          headers['Accept-Language'] = 'en-US,en;q=0.9';
+        }
+        callback({ requestHeaders: headers });
+      });
+    };
+
+    configureSession(session.defaultSession);
+    configureSession(session.fromPartition('persist:remowser'));
+
+    // Inject stealth properties into all webContents (embedded webviews and main window)
+    app.on('web-contents-created', (_event, contents) => {
+      contents.setUserAgent(CHROME_USER_AGENT);
+      contents.on('dom-ready', () => {
+        contents.executeJavaScript(`
+          try {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            if (!window.chrome) {
+              window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+            }
+          } catch (e) {}
+        `).catch(() => {});
+      });
     });
   } catch (err) {
-    console.warn('[AdBlocker] Notice:', err);
+    console.warn('[AntiBot/Stealth] Notice:', err);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Playwright Autonomous Browser Controller
+// Playwright Autonomous Stealth Browser Controller
 // ---------------------------------------------------------------------------
 async function initPlaywrightAgentBrowser(): Promise<Browser> {
-  broadcastStatus('Initializing browser engine...', 'running');
+  broadcastStatus('Initializing stealth browser engine...', 'running');
   try {
     const browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-infobars',
+        '--window-size=1440,900'
+      ]
     });
-    console.log('[Playwright] Autonomous background Chromium browser initialized.');
+    console.log('[Playwright] Stealth background Chromium browser initialized.');
     return browser;
   } catch (err: any) {
     console.warn('[Playwright] Launch fallback to CDP...', err.message);
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     } catch {
-      return await chromium.launch({ headless: true });
+      return await chromium.launch({
+        headless: true,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: ['--disable-blink-features=AutomationControlled']
+      });
     }
   }
 }
@@ -234,16 +289,44 @@ async function autoDetectModel(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Intent Detection & Direct Conversational Chat
+// Intent Detection & Query Planning Engine
 // ---------------------------------------------------------------------------
-function isConversationalPrompt(prompt: string): boolean {
+interface ExecutionPlan {
+  mode: 'chat' | 'current_page' | 'navigate_site' | 'search';
+  replyText?: string;
+  targetUrl?: string;
+  searchKeywords?: string;
+  userGoal: string;
+  planReasoning: string;
+}
+
+function isConversationalOrMetaPrompt(prompt: string): boolean {
   const p = prompt.trim().toLowerCase();
+
+  // 1. Common greetings & pleasantries
   const greetings = [
     'hi', 'hello', 'hey', 'yo', 'sup', 'who are you', 'what is remowser',
-    'what can you do', 'help', 'what are your features', 'test', 'good morning', 'good evening'
+    'what can you do', 'help', 'what are your features', 'test', 'good morning',
+    'good evening', 'thanks', 'thank you', 'how are you'
   ];
   if (greetings.includes(p)) return true;
-  if (/^(hi|hello|hey|greetings|help)\b/i.test(p) && p.length < 25) return true;
+  if (/^(hi|hello|hey|greetings|help|thanks)\b/i.test(p) && p.length < 25) return true;
+
+  // 2. Feedback or inquiries about the browser/bot/agent itself
+  const metaKeywords = [
+    'bot', 'detect', 'detecting', 'captcha', 'prompt', 'hallucin', 'ui', 'theme', 'agent', 'feature', 'error', 'bug', 'make it'
+  ];
+  const hitCount = metaKeywords.filter(k => p.includes(k)).length;
+  if (hitCount >= 2 && !p.startsWith('http') && !p.includes('google.com')) {
+    return true;
+  }
+
+  // 3. General knowledge / coding / questions not requiring live web browsing
+  if (/^(write|create|explain|how do (i|you)|what is the difference between|why does|tell me a joke)\b/i.test(p) &&
+      !/(price|buy|deal|news|weather|flight|hotel|stock|today|latest|release|schedule)/i.test(p)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -251,11 +334,8 @@ async function callRemoDirectChat(prompt: string): Promise<string> {
   const endpoint = `${LLM_BASE_URL}/v1/chat/completions`;
   const systemPrompt = `You are REMO, the autonomous AI inside REMOWSER, an open-source local AI browser.
 You run completely on-device using local Ollama models.
-Introduce yourself warmly and concisely in 2-3 sentences.
-State that you can:
-1. Autonomously browse the web, search Google, and compare prices
-2. Open websites, click buttons, fill search inputs, and extract data
-Give 2 quick examples the user can try right now (e.g. "Search for RTX 4070 prices on Google", "Find top tech stories on Hacker News").`;
+If the user is asking about the browser or reporting behavior (like bot detection or prompt searching), explain concisely that REMOWSER has updated with stealth headers and smart background planning so prompts are not searched directly and websites do not detect bot automation.
+If it is a general question or greeting, answer warmly and helpfully. Keep answers concise (2-4 sentences or clean code).`;
 
   try {
     const res = await axios.post(
@@ -267,71 +347,176 @@ Give 2 quick examples the user can try right now (e.g. "Search for RTX 4070 pric
           { role: 'user', content: prompt }
         ],
         temperature: 0.7,
-        max_tokens: 280
+        max_tokens: 300
       },
       { timeout: 15000 }
     );
-    return res.data?.choices?.[0]?.message?.content || 'Hello! I am REMO, your autonomous local AI browser. Ask me to search Google, compare prices, or automate any website task!';
+    return res.data?.choices?.[0]?.message?.content || 'Hello! I am REMO, your autonomous local AI browser. How can I assist you with your browsing today?';
   } catch {
-    return 'Hello! I am REMO, your autonomous local AI browser. Enter any task (e.g. "Search for iPhone 16 reviews on Google" or "Open wikipedia and search Linux") and I will browse and extract the answer for you!';
+    return 'Hello! I am REMO, your autonomous local AI browser. You can ask me to research topics, inspect pages, or automate website tasks in the background!';
   }
 }
 
-function resolveTargetNavigation(prompt: string): string {
+async function extractSearchKeywords(prompt: string): Promise<string> {
+  const cleanPrompt = prompt.trim();
+
+  // Fast heuristic cleanup first
+  let words = cleanPrompt
+    .replace(/^(please\s+)?(search\s+for|search|find\s+me|find|look\s+up|google|check\s+out|browse\s+to|what\s+is\s+the\s+price\s+of|what\s+is|tell\s+me\s+about|get\s+me)\s+/i, '')
+    .replace(/\s+on\s+google\b/gi, '')
+    .replace(/\s+on\s+the\s+web\b/gi, '')
+    .replace(/\s+and\s+summarize\b.*/gi, '')
+    .replace(/\s+and\s+compare\b.*/gi, '')
+    .replace(/\s+(for\s+me|today|please|now)$/gi, '')
+    .replace(/[^\w\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Limit to concise 4-5 words max (human search style, prevents long raw prompt searches)
+  const parts = words.split(' ').filter(w => w.length > 0);
+  if (parts.length > 5) {
+    words = parts.slice(0, 5).join(' ');
+  }
+
+  // Try fast LLM optimizer if available
+  try {
+    const res = await axios.post(
+      `${LLM_BASE_URL}/v1/chat/completions`,
+      {
+        model: preferredModel,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a search keyword extractor. Output ONLY 2 to 4 clean search keywords for Google. No punctuation, no quotes, no conversational filler.'
+          },
+          { role: 'user', content: cleanPrompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 25
+      },
+      { timeout: 2500 }
+    );
+    const raw = res.data?.choices?.[0]?.message?.content?.trim();
+    if (raw && raw.length > 2 && raw.length < 45 && !raw.includes('\n')) {
+      return raw.replace(/["'<>]/g, '').trim();
+    }
+  } catch {
+    // Fall back to clean heuristic words
+  }
+
+  return words || cleanPrompt.slice(0, 25);
+}
+
+async function planAgentExecution(prompt: string, currentUrl?: string): Promise<ExecutionPlan> {
   const trimmed = prompt.trim();
   const lower = trimmed.toLowerCase();
 
-  // 1. Direct URL
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-    return trimmed;
+  // 1. Direct Conversational / Meta Feedback Request
+  if (isConversationalOrMetaPrompt(trimmed)) {
+    return {
+      mode: 'chat',
+      userGoal: trimmed,
+      replyText: await callRemoDirectChat(trimmed),
+      planReasoning: 'Conversational / direct on-device response'
+    };
   }
 
-  // 2. Direct domain
+  // 2. Direct URL
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return {
+      mode: 'navigate_site',
+      targetUrl: trimmed,
+      userGoal: trimmed,
+      planReasoning: `Navigating directly to URL: ${trimmed}`
+    };
+  }
+
+  // 3. Direct Domain Name (e.g., github.com, news.ycombinator.com)
   const domainMatch = trimmed.match(/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?$/);
   if (domainMatch) {
-    return `https://${trimmed}`;
+    return {
+      mode: 'navigate_site',
+      targetUrl: `https://${trimmed}`,
+      userGoal: trimmed,
+      planReasoning: `Navigating directly to domain: ${trimmed}`
+    };
   }
 
-  // 3. Known services
+  // 4. Current Page Action (if user is viewing an active website)
+  const isOnActivePage = currentUrl && currentUrl !== 'remowser://home' && !currentUrl.startsWith('about:');
+  const pageKeywords = ['this page', 'this site', 'this article', 'current page', 'summarize this', 'read this', 'on page', 'extract'];
+  if (isOnActivePage && pageKeywords.some(kw => lower.includes(kw))) {
+    return {
+      mode: 'current_page',
+      targetUrl: currentUrl,
+      userGoal: trimmed,
+      planReasoning: `Operating on currently active page: ${currentUrl}`
+    };
+  }
+
+  // 5. Direct Service Navigation
   if (lower.includes('youtube')) {
     const q = trimmed.replace(/^(go to|open|search|find)\s+youtube\s*(and search for|and search|for)?/i, '')
-                     .replace(/on youtube/i, '')
-                     .trim();
-    if (q) return `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`;
-    return 'https://www.youtube.com';
+                     .replace(/on youtube/i, '').trim();
+    return {
+      mode: 'navigate_site',
+      targetUrl: q ? `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}` : 'https://www.youtube.com',
+      userGoal: trimmed,
+      planReasoning: 'Navigating to YouTube'
+    };
   }
 
   if (lower.includes('wikipedia')) {
     const q = trimmed.replace(/^(go to|open|search|find)\s+wikipedia\s*(and search for|and search|for|about)?/i, '')
-                     .replace(/on wikipedia/i, '')
-                     .trim();
-    if (q) return `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(q)}`;
-    return 'https://www.wikipedia.org';
+                     .replace(/on wikipedia/i, '').trim();
+    return {
+      mode: 'navigate_site',
+      targetUrl: q ? `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(q)}` : 'https://www.wikipedia.org',
+      userGoal: trimmed,
+      planReasoning: 'Navigating to Wikipedia'
+    };
   }
 
   if (lower.includes('github')) {
     const q = trimmed.replace(/^(go to|open|search|find)\s+github\s*(and search for|and search|for)?/i, '')
-                     .replace(/on github/i, '')
-                     .trim();
-    if (q) return `https://github.com/search?q=${encodeURIComponent(q)}`;
-    return 'https://github.com';
+                     .replace(/on github/i, '').trim();
+    return {
+      mode: 'navigate_site',
+      targetUrl: q ? `https://github.com/search?q=${encodeURIComponent(q)}` : 'https://github.com',
+      userGoal: trimmed,
+      planReasoning: 'Navigating to GitHub'
+    };
   }
 
   if (lower.includes('reddit')) {
     const q = trimmed.replace(/^(go to|open|search|find)\s+reddit\s*(and search for|and search|for)?/i, '')
-                     .replace(/on reddit/i, '')
-                     .trim();
-    if (q) return `https://www.reddit.com/search/?q=${encodeURIComponent(q)}`;
-    return 'https://www.reddit.com';
+                     .replace(/on reddit/i, '').trim();
+    return {
+      mode: 'navigate_site',
+      targetUrl: q ? `https://www.reddit.com/search/?q=${encodeURIComponent(q)}` : 'https://www.reddit.com',
+      userGoal: trimmed,
+      planReasoning: 'Navigating to Reddit'
+    };
   }
 
-  // 4. Default to Google Search (NOT DuckDuckGo)
-  let cleanQuery = trimmed
-    .replace(/^(search for|search|find|look up|browse to|google|get me)\s+/i, '')
-    .trim();
+  if (lower.includes('hacker news') || lower.includes('ycombinator')) {
+    return {
+      mode: 'navigate_site',
+      targetUrl: 'https://news.ycombinator.com',
+      userGoal: trimmed,
+      planReasoning: 'Navigating to Hacker News'
+    };
+  }
 
-  if (!cleanQuery) cleanQuery = trimmed;
-  return `https://www.google.com/search?q=${encodeURIComponent(cleanQuery)}`;
+  // 6. Web Search: Extract clean keywords (Never search the raw prompt sentence directly!)
+  const searchKeywords = await extractSearchKeywords(trimmed);
+  return {
+    mode: 'search',
+    targetUrl: `https://www.google.com/search?q=${encodeURIComponent(searchKeywords)}`,
+    searchKeywords,
+    userGoal: trimmed,
+    planReasoning: `Searching Google with optimized keywords: "${searchKeywords}"`
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -444,25 +629,28 @@ async function runAgentTaskLoop(task: TaskItem) {
     task.status = 'in_progress';
     broadcastTaskQueue();
 
-    const trimmedPrompt = task.prompt.trim();
+    const plan = await planAgentExecution(task.prompt, task.currentUrl);
 
-    // 1. Direct Conversational Handling
-    if (isConversationalPrompt(trimmedPrompt)) {
-      broadcastStatus('REMO is thinking...', 'running');
-      broadcastChat('system', `💬 Conversational query: "${trimmedPrompt}"`);
-      const chatReply = await callRemoDirectChat(trimmedPrompt);
+    // 1. Direct Conversational / On-Device Chat Handling (No web browsing needed)
+    if (plan.mode === 'chat') {
+      const reply = plan.replyText || await callRemoDirectChat(task.prompt);
       task.status = 'completed';
-      task.result = chatReply;
+      task.result = reply;
       broadcastTaskQueue();
       broadcastStatus('Ready', 'idle');
-      broadcastChat('remo', chatReply);
+      broadcastChat('remo', reply);
       return;
     }
 
-    // 2. Resolve Target Navigation
-    const initialUrl = resolveTargetNavigation(trimmedPrompt);
-    broadcastStatus(`Navigating to ${initialUrl}...`, 'running', 1, MAX_STEPS);
-    broadcastChat('system', `🚀 Task initialized: "${trimmedPrompt}"\n🌐 Opening: ${initialUrl}`);
+    // 2. Web Task Mode: Execute in background without hijacking user active tab
+    const initialUrl = plan.targetUrl || 'https://www.google.com';
+    if (plan.mode === 'search') {
+      broadcastChat('system', `🔍 Planned Google Search: **"${plan.searchKeywords}"**\n🎯 Goal: "${task.prompt}"`);
+      broadcastStatus(`Searching Google for "${plan.searchKeywords}"...`, 'running', 1, MAX_STEPS);
+    } else {
+      broadcastChat('system', `🌐 Navigating to **${initialUrl}**\n🎯 Goal: "${task.prompt}"`);
+      broadcastStatus(`Loading ${initialUrl}...`, 'running', 1, MAX_STEPS);
+    }
 
     // Ensure Playwright browser is ready
     if (!pwBrowser || !pwBrowser.isConnected()) {
@@ -473,9 +661,64 @@ async function runAgentTaskLoop(task: TaskItem) {
     let contextToClean: BrowserContext | null = null;
     try {
       const context = await pwBrowser.newContext({
-        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 REMOWSER/1.0',
-        viewport: { width: 1280, height: 800 }
+        userAgent: CHROME_USER_AGENT,
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 1,
+        hasTouch: false,
+        isMobile: false,
+        locale: 'en-US',
+        timezoneId: 'America/New_York',
+        extraHTTPHeaders: {
+          'Accept-Language': 'en-US,en;q=0.9',
+          'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Linux"'
+        }
       });
+
+      // Inject full anti-bot evasion scripts
+      await context.addInitScript(() => {
+        try {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        } catch (e) {}
+
+        try {
+          (window as any).chrome = {
+            app: {
+              isInstalled: false,
+              InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+              RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+            },
+            runtime: {
+              OnInstalledReason: { CHROME_UPDATE: 'chrome_update' },
+              PlatformArch: { X86_64: 'x86-64' },
+              PlatformOs: { LINUX: 'linux' }
+            },
+            loadTimes: () => ({}),
+            csi: () => ({})
+          };
+        } catch (e) {}
+
+        try {
+          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        } catch (e) {}
+
+        try {
+          Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        } catch (e) {}
+
+        try {
+          if (window.navigator.permissions?.query) {
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters: any) => (
+              parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission } as any) :
+                originalQuery(parameters)
+            );
+          }
+        } catch (e) {}
+      });
+
       contextToClean = context;
       page = await context.newPage();
     } catch {
@@ -484,8 +727,8 @@ async function runAgentTaskLoop(task: TaskItem) {
     }
     currentActivePage = page;
 
-    await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    broadcastBrowserNavigate(initialUrl);
+    await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    // Note: Background task does NOT call broadcastBrowserNavigate here, preventing active tab hijacking!
 
     while (step < MAX_STEPS) {
       step++;
@@ -507,6 +750,7 @@ async function runAgentTaskLoop(task: TaskItem) {
         task.status = 'paused';
         broadcastTaskQueue();
 
+        // Surface hidden tab to user ONLY when verification is required
         broadcastBrowserNavigate(page.url());
         broadcastHumanVerification({
           taskId: task.id,
@@ -550,7 +794,8 @@ async function runAgentTaskLoop(task: TaskItem) {
         task.result = finalMsg;
         broadcastTaskQueue();
         broadcastStatus(`✅ Done`, 'completed', step, MAX_STEPS);
-        broadcastChat('remo', `🎉 **Result**:\n${finalMsg}`, command);
+        const sourceUrl = page.url();
+        broadcastChat('remo', `🎉 **Result**:\n${finalMsg}\n\n📍 *Source: [${sourceUrl}](${sourceUrl})*`, command);
         break;
       }
 
@@ -560,7 +805,6 @@ async function runAgentTaskLoop(task: TaskItem) {
         case 'open_tab': {
           if (command.url) {
             await page.goto(command.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            broadcastBrowserNavigate(command.url);
             broadcastChat('remo', `🌐 Navigated to: ${command.url}`, command);
           }
           break;
@@ -587,7 +831,6 @@ async function runAgentTaskLoop(task: TaskItem) {
             }
           }
           await page.waitForTimeout(1000);
-          broadcastBrowserNavigate(page.url());
           break;
         }
 
@@ -614,7 +857,6 @@ async function runAgentTaskLoop(task: TaskItem) {
               }
             }
             await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-            broadcastBrowserNavigate(page.url());
           }
           break;
         }
@@ -668,7 +910,7 @@ async function runAgentTaskLoop(task: TaskItem) {
 // IPC Handlers
 // ---------------------------------------------------------------------------
 function registerIPCHandlers() {
-  ipcMain.handle('submit-prompt', async (_event, prompt: string) => {
+  ipcMain.handle('submit-prompt', async (_event, prompt: string, currentUrl?: string) => {
     if (!prompt || !prompt.trim()) {
       return { success: false, error: 'Empty prompt provided.' };
     }
@@ -676,6 +918,7 @@ function registerIPCHandlers() {
     const newTask: TaskItem = {
       id: `task_${Date.now()}`,
       prompt: prompt.trim(),
+      currentUrl: currentUrl || 'remowser://home',
       status: 'pending',
       createdAt: Date.now()
     };
@@ -725,7 +968,7 @@ function registerIPCHandlers() {
 // App Lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(async () => {
-  setupAdBlocker();
+  setupAntiBotAndStealth();
   registerIPCHandlers();
 
   await ensureOllamaService();

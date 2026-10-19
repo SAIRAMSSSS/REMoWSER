@@ -230,7 +230,7 @@ export const App: React.FC = () => {
     if (!textToSubmit || !window.remowser) return;
     setPrompt('');
     setActiveSidebarTab('chat');
-    await window.remowser.submitPrompt(textToSubmit);
+    await window.remowser.submitPrompt(textToSubmit, currentTab.url);
   };
 
   // Human in the loop Actions
@@ -250,6 +250,38 @@ export const App: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const renderMessageContent = (content: string) => {
+    const mdLinkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    const parts: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = mdLinkRegex.exec(content)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(content.substring(lastIndex, match.index));
+      }
+      const linkText = match[1];
+      const linkUrl = match[2];
+      parts.push(
+        <button
+          key={`link_${match.index}`}
+          className="chat-link-btn"
+          onClick={() => navigateWebview(linkUrl)}
+          title={`Open ${linkUrl} in browser`}
+        >
+          {linkText}
+        </button>
+      );
+      lastIndex = mdLinkRegex.lastIndex;
+    }
+
+    if (lastIndex < content.length) {
+      parts.push(content.substring(lastIndex));
+    }
+
+    return parts.length > 0 ? parts : content;
   };
 
   return (
@@ -458,6 +490,7 @@ export const App: React.FC = () => {
               className="embedded-webview"
               partition="persist:remowser"
               allowpopups={true}
+              useragent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             />
           )}
         </section>
@@ -550,7 +583,7 @@ export const App: React.FC = () => {
                       )}
                     </div>
                     <div className="msg-bubble">
-                      <div className="msg-text">{msg.text}</div>
+                      <div className="msg-text">{renderMessageContent(msg.text)}</div>
                       {msg.extractedData && (
                         <div className="extracted-data-card">
                           <div className="extracted-header">

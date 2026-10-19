@@ -7,7 +7,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentStatus, TaskItem, ChatMessage, HumanVerificationData } from './types/ipc';
 
 contextBridge.exposeInMainWorld('remowser', {
-  submitPrompt: (prompt: string) => ipcRenderer.invoke('submit-prompt', prompt),
+  submitPrompt: (prompt: string, currentUrl?: string) => ipcRenderer.invoke('submit-prompt', prompt, currentUrl),
   cancelTask: (taskId: string) => ipcRenderer.invoke('cancel-task', taskId),
   resumeAgent: (taskId: string) => ipcRenderer.invoke('resume-agent', taskId),
   getAvailableModels: () => ipcRenderer.invoke('get-models'),
