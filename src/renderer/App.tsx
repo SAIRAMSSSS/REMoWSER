@@ -103,8 +103,7 @@ export const App: React.FC = () => {
 
     const unsubNav = window.remowser.onBrowserNavigate((url) => {
       if (url && url !== 'about:blank') {
-        setUrlInput(url);
-        setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, url, title: url.replace(/^https?:\/\//, '').split('/')[0] } : t));
+        navigateWebview(url);
       }
     });
 
@@ -167,8 +166,8 @@ export const App: React.FC = () => {
       if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?$/.test(finalUrl)) {
         finalUrl = `https://${finalUrl}`;
       } else {
-        // Direct Google search (never DuckDuckGo)
-        finalUrl = `https://www.google.com/search?q=${encodeURIComponent(finalUrl)}`;
+        // Fast, reliable web search (Zero bot captchas)
+        finalUrl = `https://www.bing.com/search?q=${encodeURIComponent(finalUrl)}`;
       }
     }
 
@@ -411,7 +410,7 @@ export const App: React.FC = () => {
                     <input
                       type="text"
                       className="home-search-input"
-                      placeholder="Search Google or enter URL..."
+                      placeholder="Search the web or enter URL..."
                       value={urlInput}
                       onChange={(e) => setUrlInput(e.target.value)}
                       autoFocus

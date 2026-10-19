@@ -108,8 +108,65 @@
   const scoredInteractables = [];
   let idCounter = 1;
 
+  function decodeBingUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    if (!rawUrl.includes('bing.com/ck/a')) return rawUrl;
+    try {
+      const match = rawUrl.match(/[?&]u=a1([a-zA-Z0-9_\-]+)/);
+      if (match) {
+        let b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        return atob(b64);
+      }
+    } catch (e) {}
+    return rawUrl;
+  }
+
+  // 3️⃣ Extract Structured Search Engine Results First (Bing / Google / GitHub)
+  const searchCards = document.querySelectorAll('li.b_algo, .g, [data-sokoban-container], .b_ans, .repo-list-item');
+  const structuredResults = [];
+  const assignedElements = new Set();
+
+  for (const card of searchCards) {
+    const titleEl = card.querySelector('h2 a, h3 a, [role="heading"] a') || card.querySelector('a');
+    const snippetEl = card.querySelector('.b_caption p, p.b_algoSlug, .b_snippet, .VwiC3b, p');
+    if (titleEl) {
+      const title = (titleEl.textContent || titleEl.innerText || '').replace(/\s+/g, ' ').trim();
+      let rawHref = titleEl.getAttribute('href') || (titleEl.href || (titleEl.closest('a') ? (titleEl.closest('a').getAttribute('href') || titleEl.closest('a').href) : '')) || '';
+      let cleanHref = decodeBingUrl(rawHref);
+      if (!cleanHref || cleanHref.includes('bing.com/ck/a')) {
+        const citeEl = card.querySelector('cite');
+        if (citeEl) {
+          const citeText = (citeEl.textContent || citeEl.innerText || '').replace(/\s+/g, ' ').replace(/ › /g, '/').trim();
+          if (citeText.startsWith('http')) cleanHref = citeText;
+          else if (citeText.includes('github.com')) cleanHref = 'https://' + citeText;
+        }
+      }
+
+      const remId = idCounter++;
+      titleEl.setAttribute('data-remowser-id', remId.toString());
+      assignedElements.add(titleEl);
+
+      const snippet = snippetEl ? (snippetEl.textContent || snippetEl.innerText || '').replace(/\s+/g, ' ').trim() : '';
+      if (title && title.length > 3) {
+        structuredResults.push(`🔎 [Result #${remId}]: "${title}"\n   Link: ${cleanHref}\n   Snippet: ${snippet}`);
+        
+        scoredInteractables.push({
+          id: remId,
+          priority: 9,
+          tag: 'a',
+          text: title.length > 80 ? title.slice(0, 77) + '...' : title,
+          href: cleanHref
+        });
+      }
+    }
+    if (structuredResults.length >= 8) break;
+  }
+
+  // 4️⃣ Process Remaining Page Interactables
   for (const el of rawInteractables) {
     if (!isElementVisible(el)) continue;
+    if (assignedElements.has(el)) continue;
 
     // Skip hidden inputs
     if (el.tagName.toLowerCase() === 'input' && el.getAttribute('type') === 'hidden') continue;
@@ -132,14 +189,14 @@
     const type = el.getAttribute('type') || '';
     const name = el.getAttribute('name') || '';
     const placeholder = el.getAttribute('placeholder') || '';
-    const href = el.getAttribute('href') || '';
+    let href = el.getAttribute('href') || (tag === 'a' ? el.href : '') || '';
+    if (href) href = decodeBingUrl(href);
     const val = (el.value && type !== 'password') ? el.value : '';
 
-    // Score importance: Inputs & Buttons & Search Result Titles get top priority
+    // Score importance: Inputs & Buttons get top priority
     let priority = 1;
     if (tag === 'input' || tag === 'textarea' || tag === 'select') priority = 10;
     else if (tag === 'button' || el.getAttribute('role') === 'button') priority = 8;
-    else if (el.closest('h1, h2, h3, .g, [data-sokoban-container], article')) priority = 7;
     else if (text.length > 5) priority = 5;
 
     scoredInteractables.push({
@@ -157,11 +214,11 @@
     if (scoredInteractables.length >= 60) break;
   }
 
-  // Sort by priority so inputs, search results, and main buttons appear first
+  // Sort by priority so search results, inputs, and main buttons appear first
   scoredInteractables.sort((a, b) => b.priority - a.priority);
   const topInteractables = scoredInteractables.slice(0, 45);
 
-  // 4️⃣ Extract Meaningful Content Snippets (Results, Paragraphs, Prices)
+  // 5️⃣ Extract Meaningful Content Snippets (Results, Paragraphs, Prices)
   const contentSnippets = [];
   
   // Look for price patterns on e-commerce or search pages
@@ -183,7 +240,7 @@
     if (contentSnippets.length >= 20) break;
   }
 
-  // 5️⃣ Construct Clean, Concise Representation for REMO
+  // 6️⃣ Construct Clean, Concise Representation for REMO
   const pageTitle = document.title || 'Untitled Page';
   const pageUrl = window.location.href;
 
@@ -203,12 +260,13 @@
     `# Current Page: "${pageTitle}"`,
     `URL: ${pageUrl}`,
     '',
+    structuredResults.length > 0 ? '## Structured Search Results:\n' + structuredResults.join('\n\n') + '\n' : '',
     '## Interactive Elements (Use [#ID] in action):',
     elementsSummary || '(No interactive elements found on current viewport)',
     '',
     '## Visible Page Content & Results:',
     contentSnippets.join('\n') || (document.body ? document.body.innerText.slice(0, 500).replace(/\s+/g, ' ') : '')
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   return {
     title: pageTitle,

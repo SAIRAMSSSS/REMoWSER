@@ -298,6 +298,16 @@ interface ExecutionPlan {
 function isConversationalOrMetaPrompt(prompt: string): boolean {
   const p = prompt.trim().toLowerCase();
 
+  // If the user is asking to open, show, find, or browse something, it is an ACTION, NEVER conversational!
+  const actionKeywords = [
+    'open', 'show', 'find', 'search', 'go to', 'repo', 'github', 'get', 'check',
+    'look up', 'browse', 'read', 'summarize', 'navigate', 'visit', 'compare', 'deal', 'price',
+    'reverse engineer', 'code', 'download', 'run', 'weather', 'stock'
+  ];
+  if (actionKeywords.some(kw => p.includes(kw))) {
+    return false;
+  }
+
   // 1. Common greetings & pleasantries
   const greetings = [
     'hi', 'hello', 'hey', 'yo', 'sup', 'who are you', 'what is remowser',
@@ -305,20 +315,14 @@ function isConversationalOrMetaPrompt(prompt: string): boolean {
     'good evening', 'thanks', 'thank you', 'how are you'
   ];
   if (greetings.includes(p)) return true;
-  if (/^(hi|hello|hey|greetings|help|thanks)\b/i.test(p) && p.length < 25) return true;
+  if (/^(hi|hello|hey|greetings|help|thanks)\b/i.test(p) && p.length < 20) return true;
 
   // 2. Feedback or inquiries about the browser/bot/agent itself
   const metaKeywords = [
-    'bot', 'detect', 'detecting', 'captcha', 'prompt', 'hallucin', 'ui', 'theme', 'agent', 'feature', 'error', 'bug', 'make it'
+    'bot', 'detect', 'detecting', 'captcha', 'hallucin', 'ui', 'theme', 'agent feature', 'bug report'
   ];
   const hitCount = metaKeywords.filter(k => p.includes(k)).length;
-  if (hitCount >= 2 && !p.startsWith('http') && !p.includes('google.com')) {
-    return true;
-  }
-
-  // 3. General knowledge / coding / questions not requiring live web browsing
-  if (/^(write|create|explain|how do (i|you)|what is the difference between|why does|tell me a joke)\b/i.test(p) &&
-      !/(price|buy|deal|news|weather|flight|hotel|stock|today|latest|release|schedule)/i.test(p)) {
+  if (hitCount >= 2 && !p.startsWith('http')) {
     return true;
   }
 
@@ -329,7 +333,7 @@ async function callRemoDirectChat(prompt: string): Promise<string> {
   const endpoint = `${LLM_BASE_URL}/v1/chat/completions`;
   const systemPrompt = `You are REMO, the autonomous AI inside REMOWSER, an open-source local AI browser.
 You run completely on-device using local Ollama models.
-If the user is asking about the browser or reporting behavior (like bot detection or prompt searching), explain concisely that REMOWSER has updated with stealth headers and smart background planning so prompts are not searched directly and websites do not detect bot automation.
+If the user is asking about the browser or reporting behavior, explain warmly and concisely that REMOWSER has been updated.
 If it is a general question or greeting, answer warmly and helpfully. Keep answers concise (2-4 sentences or clean code).`;
 
   try {
@@ -355,9 +359,28 @@ If it is a general question or greeting, answer warmly and helpfully. Keep answe
 async function extractSearchKeywords(prompt: string): Promise<string> {
   const cleanPrompt = prompt.trim();
 
-  // Fast heuristic cleanup first
-  let words = cleanPrompt
-    .replace(/^(please\s+)?(search\s+for|search|find\s+me|find|look\s+up|google|check\s+out|browse\s+to|what\s+is\s+the\s+price\s+of|what\s+is|tell\s+me\s+about|get\s+me)\s+/i, '')
+  // 1. Multi-prefix heuristic cleaner
+  let words = cleanPrompt;
+  const prefixes = [
+    /^(hey|hi|hello|please)\s+/i,
+    /^(can you|could you|can u|would you)\s+/i,
+    /^(i want you to|i want u to|i would like to|i want to)\s+/i,
+    /^(show me|tell me|give me|find me|get me)\s+/i,
+    /^(search for|search|find|look up|google|check out|browse to|open)\s+/i,
+    /^(about|the)\s+/i
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const p of prefixes) {
+      if (p.test(words)) {
+        words = words.replace(p, '');
+        changed = true;
+      }
+    }
+  }
+
+  words = words
     .replace(/\s+on\s+google\b/gi, '')
     .replace(/\s+on\s+the\s+web\b/gi, '')
     .replace(/\s+and\s+summarize\b.*/gi, '')
@@ -367,13 +390,11 @@ async function extractSearchKeywords(prompt: string): Promise<string> {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Limit to concise 4-5 words max (human search style, prevents long raw prompt searches)
-  const parts = words.split(' ').filter(w => w.length > 0);
-  if (parts.length > 5) {
-    words = parts.slice(0, 5).join(' ');
+  if (cleanPrompt.toLowerCase().includes('repo') && !words.toLowerCase().includes('github')) {
+    words += ' github';
   }
 
-  // Try fast LLM optimizer if available
+  // 2. Try fast local LLM optimizer if available
   try {
     const res = await axios.post(
       `${LLM_BASE_URL}/v1/chat/completions`,
@@ -382,24 +403,28 @@ async function extractSearchKeywords(prompt: string): Promise<string> {
         messages: [
           {
             role: 'system',
-            content: 'You are a search keyword extractor. Output ONLY 2 to 4 clean search keywords for Google. No punctuation, no quotes, no conversational filler.'
+            content: 'You are a search query optimizer for an AI browser like Perplexity Comet. Extract 2 to 4 clean search keywords for the user request. Output ONLY the keywords on a single line. No quotes, no markdown, no explanations.\nExample: "i want u to show me reverse engineer anything" -> reverse engineer anything github\nExample: "hey can u open rea repo" -> rea repo github\nExample: "Search for RTX 4070 prices on Google and summarize the best deal" -> RTX 4070 price'
           },
           { role: 'user', content: cleanPrompt }
         ],
         temperature: 0.1,
-        max_tokens: 25
+        max_tokens: 30
       },
-      { timeout: 2500 }
+      { timeout: 3500 }
     );
     const raw = res.data?.choices?.[0]?.message?.content?.trim();
-    if (raw && raw.length > 2 && raw.length < 45 && !raw.includes('\n')) {
-      return raw.replace(/["'<>]/g, '').trim();
+    if (raw) {
+      const oneLine = raw.split('\n').map((s: string) => s.trim()).filter(Boolean).join(' ');
+      const sanitized = oneLine.replace(/["'<>]/g, '').trim();
+      if (sanitized.length > 2 && sanitized.length < 60) {
+        return sanitized;
+      }
     }
   } catch {
-    // Fall back to clean heuristic words
+    // Fall back to cleaned words
   }
 
-  return words || cleanPrompt.slice(0, 25);
+  return words || cleanPrompt.slice(0, 30);
 }
 
 async function planAgentExecution(prompt: string, currentUrl?: string): Promise<ExecutionPlan> {
@@ -449,7 +474,20 @@ async function planAgentExecution(prompt: string, currentUrl?: string): Promise<
     };
   }
 
-  // 5. Direct Service Navigation
+  // 5. GitHub / Repository Specific Queries
+  if (lower.includes('github') || lower.includes('repo')) {
+    const searchTerms = await extractSearchKeywords(trimmed);
+    const finalTerms = searchTerms.toLowerCase().includes('github') ? searchTerms : `${searchTerms} github`;
+    return {
+      mode: 'search',
+      targetUrl: `https://www.bing.com/search?q=${encodeURIComponent(finalTerms)}`,
+      searchKeywords: finalTerms,
+      userGoal: trimmed,
+      planReasoning: `Searching GitHub repositories for: "${finalTerms}"`
+    };
+  }
+
+  // 6. Direct Service Navigation
   if (lower.includes('youtube')) {
     const q = trimmed.replace(/^(go to|open|search|find)\s+youtube\s*(and search for|and search|for)?/i, '')
                      .replace(/on youtube/i, '').trim();
@@ -469,17 +507,6 @@ async function planAgentExecution(prompt: string, currentUrl?: string): Promise<
       targetUrl: q ? `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(q)}` : 'https://www.wikipedia.org',
       userGoal: trimmed,
       planReasoning: 'Navigating to Wikipedia'
-    };
-  }
-
-  if (lower.includes('github')) {
-    const q = trimmed.replace(/^(go to|open|search|find)\s+github\s*(and search for|and search|for)?/i, '')
-                     .replace(/on github/i, '').trim();
-    return {
-      mode: 'navigate_site',
-      targetUrl: q ? `https://github.com/search?q=${encodeURIComponent(q)}` : 'https://github.com',
-      userGoal: trimmed,
-      planReasoning: 'Navigating to GitHub'
     };
   }
 
@@ -503,14 +530,14 @@ async function planAgentExecution(prompt: string, currentUrl?: string): Promise<
     };
   }
 
-  // 6. Web Search: Extract clean keywords (Never search the raw prompt sentence directly!)
+  // 7. General Web Search: Uses Bing (Zero Captchas, Fast Structured Results)
   const searchKeywords = await extractSearchKeywords(trimmed);
   return {
     mode: 'search',
-    targetUrl: `https://www.google.com/search?q=${encodeURIComponent(searchKeywords)}`,
+    targetUrl: `https://www.bing.com/search?q=${encodeURIComponent(searchKeywords)}`,
     searchKeywords,
     userGoal: trimmed,
-    planReasoning: `Searching Google with optimized keywords: "${searchKeywords}"`
+    planReasoning: `Searching Bing with clean keywords: "${searchKeywords}"`
   };
 }
 
@@ -520,7 +547,7 @@ async function planAgentExecution(prompt: string, currentUrl?: string): Promise<
 async function callRemoLLM(userGoal: string, domContext: string, stepHistory: string[]): Promise<AgentCommand> {
   const endpoint = `${LLM_BASE_URL}/v1/chat/completions`;
 
-  const systemPrompt = `You are REMO, an autonomous browser AI. You inspect the current web page to fulfill the user's goal.
+  const systemPrompt = `You are REMO, an autonomous browser AI (like Perplexity Comet). You inspect the current web page to fulfill the user's goal.
 Respond ONLY with a single JSON object. No conversational filler outside the JSON.
 
 JSON SCHEMA:
@@ -528,6 +555,7 @@ JSON SCHEMA:
   "thought": "1 sentence describing what you observe and what you are doing",
   "action": "click" | "type" | "scroll" | "open_tab" | "extract_data" | "task_complete",
   "id": 1,
+  "url": "https://...",
   "text": "text to type",
   "direction": "down",
   "target": "target description",
@@ -535,18 +563,24 @@ JSON SCHEMA:
 }
 
 FEW-SHOT EXAMPLES:
-Example 1 (Found the answer in page/search results):
-{"thought": "I found the requested price in the search results.", "action": "task_complete", "message": "The RTX 4070 is priced starting at $549 on Newegg and $599 on Best Buy."}
+Example 1 (User asks to open, find, or show a repository or site, and target link is in results):
+{"thought": "Found the official REA repository link [#1].", "action": "task_complete", "url": "https://github.com/morluto/rea", "message": "Here is the morluto/rea repository on GitHub: https://github.com/morluto/rea (Reverse Engineer Anything)."}
 
-Example 2 (Clicking the top relevant result link):
-{"thought": "Clicking the first search result article [#3].", "action": "click", "id": 3}
+Example 2 (User asks a question and answer is in search snippets or page):
+{"thought": "Found the price details in the search results.", "action": "task_complete", "message": "The RTX 4070 is currently priced starting at $549 on Newegg and $599 on Best Buy."}
 
-Example 3 (Typing query into input):
-{"thought": "Typing the search query into [#1].", "action": "type", "id": 1, "text": "RTX 4070 price"}
+Example 3 (Navigating to a specific link to inspect details):
+{"thought": "Clicking the top relevant repository result [#1].", "action": "click", "id": 1}
+
+Example 4 (Typing a query into search box):
+{"thought": "Typing query into [#10].", "action": "type", "id": 10, "text": "RTX 4070"}
 
 CRITICAL RULES:
-1. If the information to answer the user is ALREADY visible in the page text or search snippets, IMMEDIATELY return action: "task_complete" with the complete message!
-2. Only use [#ID] numbers that actually exist in the Interactive Elements list. Never hallucinate IDs.`;
+1. If the user wants to open, view, or find a repository or site (e.g. "open rea repo", "show me reverse engineer anything", "go to reddit"):
+   - If the link is in the Search Results or page, return action: "task_complete" with the exact "url" and a summary in "message", OR return action: "click" on that link's [#ID]!
+2. If the user asks a question and the answer is visible in the page text or search snippets:
+   - IMMEDIATELY return action: "task_complete" with a detailed, well-formatted markdown answer citing the sources!
+3. Only use [#ID] numbers that actually exist in the Interactive Elements list or Search Results. Never hallucinate IDs.`;
 
   const userMessage = [
     `USER GOAL: "${userGoal}"`,
@@ -638,10 +672,10 @@ async function runAgentTaskLoop(task: TaskItem) {
     }
 
     // 2. Web Task Mode: Execute in background without hijacking user active tab
-    const initialUrl = plan.targetUrl || 'https://www.google.com';
+    const initialUrl = plan.targetUrl || 'https://www.bing.com';
     if (plan.mode === 'search') {
-      broadcastChat('system', `🔍 Planned Google Search: **"${plan.searchKeywords}"**\n🎯 Goal: "${task.prompt}"`);
-      broadcastStatus(`Searching Google for "${plan.searchKeywords}"...`, 'running', 1, MAX_STEPS);
+      broadcastChat('system', `🔍 Planned Search: **"${plan.searchKeywords}"**\n🎯 Goal: "${task.prompt}"`);
+      broadcastStatus(`Searching for "${plan.searchKeywords}"...`, 'running', 1, MAX_STEPS);
     } else {
       broadcastChat('system', `🌐 Navigating to **${initialUrl}**\n🎯 Goal: "${task.prompt}"`);
       broadcastStatus(`Loading ${initialUrl}...`, 'running', 1, MAX_STEPS);
@@ -669,6 +703,12 @@ async function runAgentTaskLoop(task: TaskItem) {
           'sec-ch-ua-mobile': '?0',
           'sec-ch-ua-platform': '"Linux"'
         }
+      });
+
+      // Track newly opened tabs/popups automatically
+      context.on('page', (newPage) => {
+        page = newPage;
+        currentActivePage = newPage;
       });
 
       // Inject full anti-bot evasion scripts
@@ -723,7 +763,6 @@ async function runAgentTaskLoop(task: TaskItem) {
     currentActivePage = page;
 
     await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    // Note: Background task does NOT call broadcastBrowserNavigate here, preventing active tab hijacking!
 
     while (step < MAX_STEPS) {
       step++;
@@ -732,11 +771,19 @@ async function runAgentTaskLoop(task: TaskItem) {
 
       await page.waitForTimeout(1200);
 
+      // Silent Bot-Detection Bypass / Search Engine Fallback
+      if (page.url().includes('google.com/sorry') || page.url().includes('google.com/recaptcha')) {
+        broadcastChat('system', '🔄 Search provider fallback: switching to Bing Search to bypass bot verification...');
+        const cleanKeywords = plan.searchKeywords || await extractSearchKeywords(task.prompt);
+        await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(cleanKeywords)}`, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        continue;
+      }
+
       // OBSERVE: Run DOM Simplifier
       broadcastStatus(`Reading page structure & data...`, 'running', step, MAX_STEPS);
       const domResult = await extractSimplifiedDOM(page);
 
-      // SECURITY BOUNDARY & HUMAN-IN-THE-LOOP CHECK
+      // SECURITY BOUNDARY & HUMAN-IN-THE-LOOP CHECK (Logins, Checkouts, Destructive actions)
       if (domResult.security.hasCaptcha || domResult.security.hasLoginForm || domResult.security.hasCheckoutForm) {
         const secReason = domResult.security.securityReason || 'Security verification required';
         const detectedType = domResult.security.hasCaptcha ? 'captcha' : (domResult.security.hasLoginForm ? 'login' : 'checkout');
@@ -789,8 +836,21 @@ async function runAgentTaskLoop(task: TaskItem) {
         task.result = finalMsg;
         broadcastTaskQueue();
         broadcastStatus(`✅ Done`, 'completed', step, MAX_STEPS);
-        const sourceUrl = page.url();
+        const sourceUrl = command.url || page.url();
         broadcastChat('remo', `🎉 **Result**:\n${finalMsg}\n\n📍 *Source: [${sourceUrl}](${sourceUrl})*`, command);
+
+        // Auto-navigate user's active browser to the destination page (like Perplexity Comet)
+        const userPromptLower = task.prompt.toLowerCase();
+        const isOpenOrShowIntent = /^(open|show|go to|view|navigate|find)\b/i.test(userPromptLower) || 
+                                   userPromptLower.includes('repo') || 
+                                   userPromptLower.includes('github') ||
+                                   userPromptLower.includes('website');
+        
+        if (command.url && (isOpenOrShowIntent || (!command.url.includes('bing.com') && !command.url.includes('google.com')))) {
+          broadcastBrowserNavigate(command.url);
+        } else if (page.url() && !page.url().includes('bing.com') && !page.url().includes('google.com')) {
+          broadcastBrowserNavigate(page.url());
+        }
         break;
       }
 
@@ -801,6 +861,10 @@ async function runAgentTaskLoop(task: TaskItem) {
           if (command.url) {
             await page.goto(command.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
             broadcastChat('remo', `🌐 Navigated to: ${command.url}`, command);
+            const userPromptLower = task.prompt.toLowerCase();
+            if (/^(open|show|go to|view|navigate)\b/i.test(userPromptLower) || userPromptLower.includes('repo')) {
+              broadcastBrowserNavigate(command.url);
+            }
           }
           break;
         }
@@ -819,13 +883,22 @@ async function runAgentTaskLoop(task: TaskItem) {
           }
           if (!clicked) {
             // Smart fallback: click first result link
-            const firstLink = page.locator('h3 a, .g a, article a').first();
+            const firstLink = page.locator('h2 a, h3 a, .g a, article a, li.b_algo a').first();
             if (await firstLink.count() > 0) {
               await firstLink.click({ timeout: 4000, force: true }).catch(() => {});
+              clicked = true;
               broadcastChat('remo', `👆 Clicked top result link`, command);
             }
           }
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
           await page.waitForTimeout(1000);
+
+          // If navigation brought us to a destination website, auto-navigate browser
+          const userPromptLower = task.prompt.toLowerCase();
+          const isOpenIntent = /^(open|show|go to|view|navigate)\b/i.test(userPromptLower) || userPromptLower.includes('repo');
+          if (isOpenIntent && page.url() && !page.url().includes('bing.com') && !page.url().includes('google.com')) {
+            broadcastBrowserNavigate(page.url());
+          }
           break;
         }
 
