@@ -19,6 +19,7 @@ const CDP_PORT = 9222;
 const CHROME_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+app.commandLine.appendSwitch('remote-debugging-port', `${CDP_PORT}`);
 
 let mainWindow: BrowserWindow | null = null;
 let pwBrowser: Browser | null = null;
@@ -27,6 +28,7 @@ let currentActivePage: Page | null = null;
 // Task Queue Management
 const taskQueue: TaskItem[] = [];
 let currentRunningTaskId: string | null = null;
+let isTaskLoopRunning = false;
 let resumeResolver: ((value: boolean) => void) | null = null;
 
 // LLM Configuration
@@ -141,6 +143,8 @@ function setupAntiBotAndStealth() {
 // ---------------------------------------------------------------------------
 async function initPlaywrightAgentBrowser(): Promise<Browser> {
   broadcastStatus('Initializing stealth browser engine...', 'running');
+
+  // 1. First attempt: Launch via Playwright installed Chromium
   try {
     const browser = await chromium.launch({
       headless: true,
@@ -158,17 +162,55 @@ async function initPlaywrightAgentBrowser(): Promise<Browser> {
     console.log('[Playwright] Stealth background Chromium browser initialized.');
     return browser;
   } catch (err: any) {
-    console.warn('[Playwright] Launch fallback to CDP...', err.message);
-    try {
-      return await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-    } catch {
-      return await chromium.launch({
-        headless: true,
-        ignoreDefaultArgs: ['--enable-automation'],
-        args: ['--disable-blink-features=AutomationControlled']
-      });
+    console.warn('[Playwright] Default Chromium launch notice:', err.message);
+  }
+
+  // 2. Second attempt: Launch system Google Chrome / Chromium if installed
+  const systemChromePaths = [
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/snap/bin/chromium',
+    '/opt/google/chrome/google-chrome'
+  ];
+  for (const exePath of systemChromePaths) {
+    if (existsSync(exePath)) {
+      try {
+        const browser = await chromium.launch({
+          executablePath: exePath,
+          headless: true,
+          ignoreDefaultArgs: ['--enable-automation'],
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-blink-features=AutomationControlled',
+            '--window-size=1440,900'
+          ]
+        });
+        console.log(`[Playwright] Launched system browser via ${exePath}`);
+        return browser;
+      } catch (e: any) {
+        console.warn(`[Playwright] System browser at ${exePath} launch failed:`, e.message);
+      }
     }
   }
+
+  // 3. Third attempt: Connect over CDP to Electron Chromium instance
+  try {
+    const cdpBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+    console.log('[Playwright] Successfully connected over CDP to Electron instance.');
+    return cdpBrowser;
+  } catch (cdpErr: any) {
+    console.warn('[Playwright] CDP connection attempt failed:', cdpErr.message);
+  }
+
+  // 4. Final attempt: fallback launch
+  return await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -188,23 +230,28 @@ interface SimplifierResult {
 }
 
 async function extractSimplifiedDOM(page: Page): Promise<SimplifierResult> {
-  const payloadPath = join(__dirname, 'agents', 'domSimplifier.js');
+  const possiblePaths = [
+    join(__dirname, 'agents', 'domSimplifier.js'),
+    join(__dirname, '..', 'src', 'agents', 'domSimplifier.js'),
+    join(__dirname, '..', 'dist', 'agents', 'domSimplifier.js'),
+    '/home/senju/Documents/REMoWSER/src/agents/domSimplifier.js'
+  ];
+
   let scriptContent = '';
-  if (existsSync(payloadPath)) {
-    scriptContent = readFileSync(payloadPath, 'utf-8');
-  } else {
-    const altPath = join(__dirname, '..', 'src', 'agents', 'domSimplifier.js');
-    if (existsSync(altPath)) {
-      scriptContent = readFileSync(altPath, 'utf-8');
-    } else {
-      throw new Error(`domSimplifier.js payload not found at ${payloadPath}`);
+  for (const p of possiblePaths) {
+    if (existsSync(p)) {
+      try {
+        scriptContent = readFileSync(p, 'utf-8');
+        break;
+      } catch {}
     }
   }
 
-  const result = await page.evaluate((scriptStr: string) => {
-    return eval(scriptStr);
-  }, scriptContent);
+  if (!scriptContent) {
+    throw new Error('domSimplifier.js payload not found in any standard directory.');
+  }
 
+  const result = await page.evaluate(scriptContent);
   return result as SimplifierResult;
 }
 
@@ -441,24 +488,26 @@ async function planAgentExecution(prompt: string, currentUrl?: string): Promise<
     };
   }
 
-  // 2. Direct URL
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+  // 2. Direct URL or Direct Domain (with optional open/navigate prefix)
+  const strippedNavPrompt = trimmed.replace(/^(open|go to|browse to|navigate to|visit|show me)\s+/i, '').trim();
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || strippedNavPrompt.startsWith('http://') || strippedNavPrompt.startsWith('https://')) {
+    const target = (trimmed.startsWith('http') ? trimmed : strippedNavPrompt);
     return {
       mode: 'navigate_site',
-      targetUrl: trimmed,
+      targetUrl: target,
       userGoal: trimmed,
-      planReasoning: `Navigating directly to URL: ${trimmed}`
+      planReasoning: `Navigating directly to URL: ${target}`
     };
   }
 
   // 3. Direct Domain Name (e.g., github.com, news.ycombinator.com)
-  const domainMatch = trimmed.match(/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?$/);
+  const domainMatch = strippedNavPrompt.match(/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?$/);
   if (domainMatch) {
     return {
       mode: 'navigate_site',
-      targetUrl: `https://${trimmed}`,
+      targetUrl: `https://${strippedNavPrompt}`,
       userGoal: trimmed,
-      planReasoning: `Navigating directly to domain: ${trimmed}`
+      planReasoning: `Navigating directly to domain: ${strippedNavPrompt}`
     };
   }
 
@@ -606,7 +655,7 @@ CRITICAL RULES:
       },
       {
         headers: { 'Content-Type': 'application/json' },
-        timeout: 40000
+        timeout: 90000
       }
     );
 
@@ -622,26 +671,60 @@ CRITICAL RULES:
 
 function parseCommandJSON(raw: string): AgentCommand {
   let cleaned = raw.trim();
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '').trim();
-  }
+  // Strip markdown fences anywhere
+  cleaned = cleaned.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1').trim();
 
   try {
-    return JSON.parse(cleaned);
-  } catch {
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
+    return normalizeParsedCommand(JSON.parse(cleaned));
+  } catch {}
+
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    let candidate = jsonMatch[0];
+    try {
+      return normalizeParsedCommand(JSON.parse(candidate));
+    } catch {
+      // Remove trailing commas: , \s* } or , \s* ]
+      candidate = candidate.replace(/,\s*([}\]])/g, '$1');
+      // Remove single-line JS comments: // ...
+      candidate = candidate.replace(/\/\/[^\n]*/g, '');
       try {
-        return JSON.parse(jsonMatch[0]);
-      } catch {
-        // Fallback
-      }
+        return normalizeParsedCommand(JSON.parse(candidate));
+      } catch {}
     }
   }
 
   return {
     action: 'task_complete',
-    message: raw.replace(/[{}]/g, '').slice(0, 300)
+    message: raw.replace(/[{}"\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)
+  };
+}
+
+function normalizeParsedCommand(cmd: any): AgentCommand {
+  if (!cmd || typeof cmd !== 'object') {
+    return { action: 'task_complete', message: String(cmd || '') };
+  }
+
+  let act = String(cmd.action || '').toLowerCase().trim();
+  if (['done', 'finish', 'complete', 'answer'].includes(act)) {
+    act = 'task_complete';
+  } else if (['navigate', 'goto', 'open'].includes(act)) {
+    act = 'open_tab';
+  } else if (!act && (cmd.message || cmd.answer)) {
+    act = 'task_complete';
+  } else if (!act && cmd.url) {
+    act = 'open_tab';
+  } else if (!act && cmd.id != null) {
+    act = 'click';
+  }
+
+  const parsedId = cmd.id != null ? parseInt(String(cmd.id).replace(/[^\d]/g, ''), 10) : undefined;
+
+  return {
+    ...cmd,
+    action: (act as any) || 'task_complete',
+    id: !isNaN(parsedId as number) ? parsedId : undefined,
+    message: cmd.message || cmd.answer || undefined
   };
 }
 
@@ -757,12 +840,16 @@ async function runAgentTaskLoop(task: TaskItem) {
       contextToClean = context;
       page = await context.newPage();
     } catch {
-      const cdpContext = pwBrowser.contexts()[0];
+      const cdpContext = pwBrowser.contexts()[0] || await pwBrowser.newContext();
       page = await cdpContext.newPage();
     }
     currentActivePage = page;
 
-    await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    try {
+      await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    } catch (navErr: any) {
+      console.warn('[Page Nav Notice]', navErr.message);
+    }
 
     while (step < MAX_STEPS) {
       step++;
@@ -943,6 +1030,15 @@ async function runAgentTaskLoop(task: TaskItem) {
           break;
         }
 
+        case 'search': {
+          const q = command.text || command.target || command.message;
+          if (q) {
+            await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout: 25000 });
+            broadcastChat('remo', `🔍 Searched for: ${q}`, command);
+          }
+          break;
+        }
+
         case 'switch_tab': {
           break;
         }
@@ -975,6 +1071,23 @@ async function runAgentTaskLoop(task: TaskItem) {
 }
 
 // ---------------------------------------------------------------------------
+// Sequential Task Queue Processor
+// ---------------------------------------------------------------------------
+async function processNextQueueTask() {
+  if (isTaskLoopRunning) return;
+  const nextTask = taskQueue.find(t => t.status === 'pending');
+  if (!nextTask) return;
+
+  isTaskLoopRunning = true;
+  try {
+    await runAgentTaskLoop(nextTask);
+  } finally {
+    isTaskLoopRunning = false;
+    setTimeout(processNextQueueTask, 250);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // IPC Handlers
 // ---------------------------------------------------------------------------
 function registerIPCHandlers() {
@@ -995,9 +1108,7 @@ function registerIPCHandlers() {
     broadcastTaskQueue();
     broadcastChat('user', prompt.trim());
 
-    setTimeout(() => {
-      runAgentTaskLoop(newTask);
-    }, 100);
+    processNextQueueTask();
 
     return { success: true, taskId: newTask.id };
   });
@@ -1012,6 +1123,7 @@ function registerIPCHandlers() {
       }
       broadcastTaskQueue();
       broadcastStatus('Task cancelled', 'idle');
+      processNextQueueTask();
       return { success: true };
     }
     return { success: false };

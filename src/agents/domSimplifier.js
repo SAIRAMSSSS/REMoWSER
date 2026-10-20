@@ -237,7 +237,7 @@
         contentSnippets.push(`- ${txt}`);
       }
     }
-    if (contentSnippets.length >= 20) break;
+    if (contentSnippets.length >= 40) break;
   }
 
   // 6️⃣ Construct Clean, Concise Representation for REMO
@@ -265,7 +265,7 @@
     elementsSummary || '(No interactive elements found on current viewport)',
     '',
     '## Visible Page Content & Results:',
-    contentSnippets.join('\n') || (document.body ? document.body.innerText.slice(0, 500).replace(/\s+/g, ' ') : '')
+    contentSnippets.join('\n') || (document.body ? document.body.innerText.slice(0, 2500).replace(/\s+/g, ' ') : '')
   ].filter(Boolean).join('\n');
 
   return {

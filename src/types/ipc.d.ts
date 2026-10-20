@@ -4,7 +4,7 @@
  */
 
 export interface AgentCommand {
-  action: 'open_tab' | 'switch_tab' | 'click' | 'type' | 'scroll' | 'extract_data' | 'task_complete';
+  action: 'open_tab' | 'switch_tab' | 'click' | 'type' | 'scroll' | 'extract_data' | 'task_complete' | 'search';
   url?: string;
   tab_id?: string;
   id?: number;
